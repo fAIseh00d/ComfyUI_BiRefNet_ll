@@ -31,6 +31,13 @@ usage_to_weights_file = {
 
 modelNameList = ['General', 'General-HR', 'General-Lite', 'General-Lite-2K', 'Portrait', 'Matting', 'DIS', 'HRSOD', 'COD', 'DIS-TR_TEs']
 
+def get_device_list():
+    devices = ["AUTO", "CPU"]
+    if deviceType == "cuda" and torch.cuda.device_count() > 1:
+        devices += [f"cuda:{i}" for i in range(torch.cuda.device_count())]
+    else:
+        devices.append(deviceType)
+    return devices
 
 def get_model_path(model_name):
     return os.path.join(models_path_default, f"{model_name}.safetensors")
@@ -104,7 +111,7 @@ class AutoDownloadBiRefNetModel:
         return {
             "required": {
                 "model_name": (modelNameList,),
-                "device": (["AUTO", "CPU"],)
+                "device": (get_device_list(),)
             },
             "optional": {
                 "dtype": (["float32", "float16"], {"default": "float32"})
@@ -127,8 +134,10 @@ class AutoDownloadBiRefNetModel:
             model_full_path = folder_paths.get_full_path(models_dir_key, model_file_name)
         if device == "AUTO":
             device_type = deviceType
-        else:
+        elif device == "CPU":
             device_type = "cpu"
+        else:
+            device_type = device
         state_dict = safetensors.torch.load_file(model_full_path, device=device_type)
         biRefNet_model.load_state_dict(state_dict)
         biRefNet_model.to(device_type, dtype=torch_dtype[dtype])
@@ -143,7 +152,7 @@ class LoadRembgByBiRefNetModel:
         return {
             "required": {
                 "model": (folder_paths.get_filename_list(models_dir_key),),
-                "device": (["AUTO", "CPU"], )
+                "device": (get_device_list(),)
             },
             "optional": {
                 "use_weight": ("BOOLEAN", {"default": False}),
@@ -169,8 +178,10 @@ class LoadRembgByBiRefNetModel:
         model_path = folder_paths.get_full_path(models_dir_key, model)
         if device == "AUTO":
             device_type = deviceType
-        else:
+        elif device == "CPU":
             device_type = "cpu"
+        else:
+            device_type = device
         if model_path.endswith(".safetensors"):
             state_dict = safetensors.torch.load_file(model_path, device=device_type)
         else:
@@ -222,7 +233,10 @@ class GetMaskByBiRefNet:
     def get_mask(self, model, images, width=1024, height=1024, upscale_method='bilinear', mask_threshold=0.000):
         model, version = model
         one_torch = next(model.parameters())
-        model_device_type = one_torch.device.type
+        if hasattr(one_torch.device, 'index') and one_torch.device.index is not None:
+            model_device_type = f"{one_torch.device.type}:{one_torch.device.index}"
+        else:
+            model_device_type = one_torch.device.type
         model_dtype = one_torch.dtype
         b, h, w, c = images.shape
         image_bchw = images.permute(0, 3, 1, 2)
