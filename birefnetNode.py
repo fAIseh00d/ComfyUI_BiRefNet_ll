@@ -9,7 +9,7 @@ import folder_paths
 from birefnet.models.birefnet import BiRefNet
 from birefnet_old.models.birefnet import BiRefNet as OldBiRefNet
 from birefnet.utils import check_state_dict
-from .util import refine_foreground, filter_mask, add_mask_as_alpha
+from .util import filter_mask, add_mask_as_alpha, refine_foreground_pil, tensor_to_pil, pil_to_tensor
 deviceType = model_management.get_torch_device().type
 
 models_dir_key = "birefnet"
@@ -19,17 +19,23 @@ models_path_default = folder_paths.get_folder_paths(models_dir_key)[0]
 usage_to_weights_file = {
     'General': 'BiRefNet',
     'General-HR': 'BiRefNet_HR',
-    'General-Lite': 'BiRefNet_T',
+    'Matting-HR': 'BiRefNet_HR-matting',
+    'General-Lite': 'BiRefNet_lite',
     'General-Lite-2K': 'BiRefNet_lite-2K',
+    'General-reso_512': 'BiRefNet_512x512',
     'Portrait': 'BiRefNet-portrait',
     'Matting': 'BiRefNet-matting',
+    'Matting-Lite': 'BiRefNet_lite-matting',
+    # 'Anime-Lite': 'BiRefNet_lite-Anime',
     'DIS': 'BiRefNet-DIS5K',
     'HRSOD': 'BiRefNet-HRSOD',
     'COD': 'BiRefNet-COD',
-    'DIS-TR_TEs': 'BiRefNet-DIS5K-TR_TEs'
+    'DIS-TR_TEs': 'BiRefNet-DIS5K-TR_TEs',
+    'General-legacy': 'BiRefNet-legacy',
+    'General-dynamic': 'BiRefNet_dynamic',
 }
 
-modelNameList = ['General', 'General-HR', 'General-Lite', 'General-Lite-2K', 'Portrait', 'Matting', 'DIS', 'HRSOD', 'COD', 'DIS-TR_TEs']
+modelNameList = list(usage_to_weights_file.keys())
 
 def get_device_list():
     devices = ["AUTO", "CPU"]
@@ -125,7 +131,7 @@ class AutoDownloadBiRefNetModel:
     DESCRIPTION = "Auto download BiRefNet model from huggingface to models/BiRefNet/{model_name}.safetensors"
 
     def load_model(self, model_name, device, dtype="float32"):
-        bb_index = 3 if model_name == "General-Lite" or model_name == "General-Lite-2K" else 6
+        bb_index = 3 if model_name == "General-Lite" or model_name == "General-Lite-2K" or model_name == "Matting-Lite" else 6
         biRefNet_model = BiRefNet(bb_pretrained=False, bb_index=bb_index)
         model_file_name = f'{model_name}.safetensors'
         model_full_path = folder_paths.get_full_path(models_dir_key, model_file_name)
@@ -172,7 +178,7 @@ class LoadRembgByBiRefNetModel:
             biRefNet_model = OldBiRefNet(bb_pretrained=use_weight)
         else:
             version = VERSION[1]
-            bb_index = 3 if model == "General-Lite.safetensors" or model == "General-Lite-2K.safetensors" else 6
+            bb_index = 3 if model == "General-Lite.safetensors" or model == "General-Lite-2K.safetensors" or model == "Matting-Lite.safetensors" else 6
             biRefNet_model = BiRefNet(bb_pretrained=use_weight, bb_index=bb_index)
 
         model_path = folder_paths.get_full_path(models_dir_key, model)
@@ -278,8 +284,8 @@ class BlurFusionForegroundEstimation:
             "required": {
                 "images": ("IMAGE",),
                 "masks": ("MASK",),
-                "blur_size": ("INT", {"default": 91, "min": 1, "max": 255, "step": 2, }),
-                "blur_size_two": ("INT", {"default": 7, "min": 1, "max": 255, "step": 2, }),
+                "blur_size": ("INT", {"default": 90, "min": 1, "max": 255, "step": 1, }),
+                "blur_size_two": ("INT", {"default": 6, "min": 1, "max": 255, "step": 1, }),
                 "fill_color": ("BOOLEAN", {"default": False}),
                 "color": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFF, "step": 1, "display": "color"}),
             }
@@ -296,16 +302,28 @@ class BlurFusionForegroundEstimation:
         if b != masks.shape[0]:
             raise ValueError("images and masks must have the same batch size")
 
-        image_bchw = images.permute(0, 3, 1, 2)
+        # image_bchw = images.permute(0, 3, 1, 2)
 
         if masks.dim() == 3:
             # (b, h, w) => (b, 1, h, w)
             out_masks = masks.unsqueeze(1)
 
+        # 需要转成pil用cv2.blur，结果图的背景色比较纯（gaussian_blur的背景色不纯，边缘轮廓线比较重），应用遮罩时不能用点乘，结果可能有边缘轮廓
+        _image_maskeds = []
+        # for _image, _out_mask in images, out_masks:
+        for idx, (_image, _out_mask) in enumerate(zip(images.unbind(dim=0), out_masks.unbind(dim=0))):
+            _image_masked = refine_foreground_pil(tensor_to_pil(_image), tensor_to_pil(_out_mask.permute(1, 2, 0)))
+            _image_masked = pil_to_tensor(_image_masked)
+            _image_maskeds.append(_image_masked)
+            del _image_masked
+
+        _image_masked_tensor = torch.cat(_image_maskeds, dim=0)
+        del _image_maskeds
+
         # (b, c, h, w)
-        _image_masked = refine_foreground(image_bchw, out_masks, r1=blur_size, r2=blur_size_two)
+        # _image_masked = refine_foreground(image_bchw, out_masks, r1=blur_size, r2=blur_size_two)
         # (b, c, h, w) => (b, h, w, c)
-        _image_masked = _image_masked.permute(0, 2, 3, 1)
+        # _image_masked = _image_masked.permute(0, 2, 3, 1)
         if fill_color and color is not None:
             r = torch.full([b, h, w, 1], ((color >> 16) & 0xFF) / 0xFF)
             g = torch.full([b, h, w, 1], ((color >> 8) & 0xFF) / 0xFF)
@@ -313,8 +331,8 @@ class BlurFusionForegroundEstimation:
             # (b, h, w, 3)
             background_color = torch.cat((r, g, b), dim=-1)
             # (b, 1, h, w) => (b, h, w, 3)
-            apply_mask = out_masks.permute(0, 2, 3, 1).expand_as(_image_masked)
-            out_images = _image_masked * apply_mask + background_color * (1 - apply_mask)
+            apply_mask = out_masks.permute(0, 2, 3, 1).expand_as(_image_masked_tensor)
+            out_images = _image_masked_tensor * apply_mask + background_color * (1 - apply_mask)
             # (b, h, w, 3)=>(b, h, w, 3)
             del background_color, apply_mask
             out_masks = out_masks.squeeze(1)
@@ -322,9 +340,9 @@ class BlurFusionForegroundEstimation:
             # (b, 1, h, w) => (b, h, w)
             out_masks = out_masks.squeeze(1)
             # image的非mask对应部分设为透明 => (b, h, w, 4)
-            out_images = add_mask_as_alpha(_image_masked.cpu(), out_masks.cpu())
+            out_images = add_mask_as_alpha(_image_masked_tensor.cpu(), out_masks.cpu())
 
-        del _image_masked
+        del _image_masked_tensor
 
         return out_images, out_masks
 
@@ -356,8 +374,8 @@ class RembgByBiRefNetAdvanced(GetMaskByBiRefNet, BlurFusionForegroundEstimation)
                                        "default": "bilinear",
                                        "tooltip": "Interpolation method for pre-processing image and post-processing mask"
                                    }),
-                "blur_size": ("INT", {"default": 91, "min": 1, "max": 255, "step": 2, }),
-                "blur_size_two": ("INT", {"default": 7, "min": 1, "max": 255, "step": 2, }),
+                "blur_size": ("INT", {"default": 90, "min": 1, "max": 255, "step": 1, }),
+                "blur_size_two": ("INT", {"default": 6, "min": 1, "max": 255, "step": 1, }),
                 "fill_color": ("BOOLEAN", {"default": False}),
                 "color": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFF, "step": 1, "display": "color"}),
                 "mask_threshold": ("FLOAT", {"default": 0.000, "min": 0.0, "max": 1.0, "step": 0.001, }),
