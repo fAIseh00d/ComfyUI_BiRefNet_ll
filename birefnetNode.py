@@ -39,7 +39,7 @@ modelNameList = list(usage_to_weights_file.keys())
 
 def get_device_list():
     devices = ["AUTO", "CPU"]
-    if deviceType == "cuda" and torch.cuda.device_count() > 1:
+    if deviceType == "cuda":
         devices += [f"cuda:{i}" for i in range(torch.cuda.device_count())]
     else:
         devices.append(deviceType)
